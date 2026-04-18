@@ -1,0 +1,17 @@
+{
+  "upstream": {
+    "repo": "microsoft/Powercat-Copilotstudio-Accelerator",
+    "branch": "main",
+    "syncBranch": "main",
+    "trackingFile": ".upstream/base-commit.txt",
+    "ownedPaths": [
+      ".github/",
+      ".upstream/",
+      "AGENT_INVENTORY.md",
+      "AGENTREVIEWTOOL_REFERENCE_GUIDE.md",
+      "docs/UPSTREAM_SYNC.md"
+    ]
+  },
+  "schedule": "monthly",
+  "notes": "This is the AgentCraftworks fork of microsoft/Powercat-Copilotstudio-Accelerator. The ownedPaths list files that may differ from upstream and should be reviewed carefully during sync PRs before merging."
+}

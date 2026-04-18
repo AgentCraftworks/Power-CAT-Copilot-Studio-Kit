@@ -1,0 +1,161 @@
+name: Upstream Sync — microsoft/Powercat-Copilotstudio-Accelerator
+
+on:
+  schedule:
+    - cron: "0 9 1 * *" # 09:00 UTC, 1st of each month
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no PR created)"
+        type: boolean
+        default: false
+
+jobs:
+  sync:
+    name: Sync from upstream
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config core.longpaths true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/microsoft/Powercat-Copilotstudio-Accelerator.git
+          git fetch upstream main --depth=200
+          echo "✅ Upstream fetched"
+
+      - name: Read base commit
+        id: base
+        run: |
+          BASE=$(cat .upstream/base-commit.txt 2>/dev/null || echo "")
+          echo "sha=$BASE" >> "$GITHUB_OUTPUT"
+          if [ -z "$BASE" ]; then
+            echo "⚠️  No base commit found — will attempt full merge"
+          else
+            echo "📌 Base commit: $BASE"
+          fi
+
+      - name: Check for new upstream commits
+        id: check
+        run: |
+          BASE="${{ steps.base.outputs.sha }}"
+          UPSTREAM_HEAD=$(git rev-parse upstream/main)
+
+          if [ "$BASE" = "$UPSTREAM_HEAD" ]; then
+            echo "✅ Already up to date with upstream ($BASE)"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            COUNT=$(git rev-list --count "${BASE}..upstream/main" 2>/dev/null || echo "?")
+            echo "🆕 $COUNT new commit(s) upstream since $BASE"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "upstream_head=$UPSTREAM_HEAD" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create sync branch
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          BRANCH="upstream-sync/$(date +%Y-%m)"
+          git checkout -b "$BRANCH"
+          echo "SYNC_BRANCH=$BRANCH" >> "$GITHUB_ENV"
+
+      - name: Apply upstream changes
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          BASE="${{ steps.base.outputs.sha }}"
+
+          if [ -z "$BASE" ]; then
+            echo "Performing initial upstream merge (no prior base)..."
+            git merge upstream/main \
+              --allow-unrelated-histories \
+              --no-edit \
+              -m "chore: initial upstream sync from microsoft/Powercat-Copilotstudio-Accelerator" \
+              || {
+                echo "::warning::Merge had conflicts — review and resolve manually"
+                git add -A
+                git commit -m "chore: initial upstream sync (with conflicts to resolve)" --allow-empty
+              }
+          else
+            echo "Cherry-picking commits from $BASE to upstream/main..."
+            # Stage all upstream changes as a squashed merge commit for cleanliness
+            git merge upstream/main \
+              --no-edit \
+              -m "chore: upstream sync $(date +%Y-%m-%d) from microsoft/Powercat-Copilotstudio-Accelerator" \
+              || {
+                echo "::warning::Merge had conflicts — review and resolve before merging the PR"
+                git add -A
+                git commit -m "chore: upstream sync $(date +%Y-%m-%d) (conflicts need resolution)" --allow-empty
+              }
+          fi
+
+          echo "✅ Upstream changes applied"
+
+      - name: Update base commit tracking
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          UPSTREAM_HEAD="${{ steps.check.outputs.upstream_head }}"
+          echo -n "$UPSTREAM_HEAD" > .upstream/base-commit.txt
+          git add .upstream/base-commit.txt
+          git commit -m "chore: track upstream base commit $UPSTREAM_HEAD" --allow-empty
+          echo "✅ Base commit updated to $UPSTREAM_HEAD"
+
+      - name: Push sync branch
+        if: steps.check.outputs.has_changes == 'true' && inputs.dry_run != 'true'
+        run: |
+          git push origin "$SYNC_BRANCH"
+
+      - name: Create pull request
+        if: steps.check.outputs.has_changes == 'true' && inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_HEAD="${{ steps.check.outputs.upstream_head }}"
+          SHORT_SHA="${UPSTREAM_HEAD:0:7}"
+
+          gh pr create \
+            --title "chore: upstream sync $(date +%Y-%m-%d) (microsoft/Powercat-Copilotstudio-Accelerator@${SHORT_SHA})" \
+            --body "$(cat <<'EOF'
+## Upstream Sync
+
+Automated monthly sync from [microsoft/Powercat-Copilotstudio-Accelerator](https://github.com/microsoft/Powercat-Copilotstudio-Accelerator) main branch.
+
+**Upstream HEAD:** \`$UPSTREAM_HEAD\`
+**Sync date:** $(date +%Y-%m-%d)
+
+### Before Merging
+
+Review changes in the following **owned paths** — these may have intentional AgentCraftworks divergence:
+- `.github/` — our workflows and issue templates
+- `.upstream/` — sync tracking files
+- `AGENT_INVENTORY.md` — AgentCraftworks-specific agent registry entries
+- `AGENTREVIEWTOOL_REFERENCE_GUIDE.md` — AgentCraftworks-specific review guidance
+- `docs/UPSTREAM_SYNC.md` — this sync documentation
+
+For all other paths, the upstream changes should be safe to accept.
+
+If there are merge conflicts, resolve them in favor of upstream changes unless the conflicting file is in the owned paths list above.
+
+See [docs/UPSTREAM_SYNC.md](../docs/UPSTREAM_SYNC.md) for the full sync policy.
+EOF
+)" \
+            --base main \
+            --head "$SYNC_BRANCH" \
+            --label "upstream-sync,automated"
+
+      - name: Dry run summary
+        if: steps.check.outputs.has_changes == 'true' && inputs.dry_run == 'true'
+        run: |
+          echo "::notice::Dry run — would create PR for branch $SYNC_BRANCH with upstream changes up to ${{ steps.check.outputs.upstream_head }}"
+          git diff HEAD~1 --stat || true
